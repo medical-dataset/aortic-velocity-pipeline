@@ -1,4 +1,4 @@
-# 🩺 Aortic Velocity Registration & Template Pipeline
+#  Aortic Velocity Registration & Template Pipeline
 
 This repository provides a modular pipeline for processing, registering, and analyzing masked aortic velocity `.npy` data using both **rigid** and **non-rigid (deformable)** registration techniques.
 
@@ -6,7 +6,7 @@ This repository provides a modular pipeline for processing, registering, and ana
 
 ---
 
-## 📁 Repository Structure
+##  Repository Structure
 
 | File | Description |
 |------|-------------|
@@ -19,16 +19,16 @@ This repository provides a modular pipeline for processing, registering, and ana
 
 ## ⚙️ Features
 
-- ✅ Rigid (COM-based) alignment
-- ✅ Deformable (BSpline) registration with SimpleITK
-- ✅ Static template generation from velocity masks
-- ✅ Multi-template and single-template support
-- ✅ Visualization: time profiles, spatiotemporal maps, variance maps
-- ✅ Export of aligned velocities and animated GIFs
+-  Rigid (COM-based) alignment
+-  Deformable (BSpline) registration with SimpleITK
+-  Static template generation from velocity masks
+-  Multi-template and single-template support
+-  Visualization: time profiles, spatiotemporal maps, variance maps
+-  Export of aligned velocities and animated GIFs
 
 ---
 
-## 🔧 Installation
+##  Installation
 
 Requires Python 3.8+
 
@@ -46,7 +46,7 @@ pip install numpy matplotlib seaborn scikit-image SimpleITK scikit-learn imageio
 
 ---
 
-## 🧪 Usage
+##  Usage
 
 ### 1. Run Rigid Alignment
 
@@ -88,7 +88,7 @@ python Nonregidalignment.py
 
 ---
 
-## 🧾 Input Format
+##  Input Format
 
 - Each `.npy` file should contain a 3D NumPy array of shape:
   ```
@@ -98,7 +98,7 @@ python Nonregidalignment.py
 
 ---
 
-## 📤 Output
+##  Output
 
 Each processed sample generates:
 
@@ -116,23 +116,23 @@ output_folder/
 
 ---
 
-## 📌 Customization
+##  Customization
 
-- 🔁 Switch reference frame method: `'area'`, `'similarity'`, `'template'`
-- 🎯 Choose spatiotemporal profile axis: `'horizontal'`, `'vertical'`, `'full_x'`, `'full_y'`
-- 🧬 Change patch size or frame index in core functions
-- 🧪 Easily extendable to magnitude/phase images or different velocity encodings
+-  Switch reference frame method: `'area'`, `'similarity'`, `'template'`
+-  Choose spatiotemporal profile axis: `'horizontal'`, `'vertical'`, `'full_x'`, `'full_y'`
+-  Change patch size or frame index in core functions
+-  Easily extendable to magnitude/phase images or different velocity encodings
 
 ---
 
-## 📚 Citation
+##  Citation
 
 > If you use this work in your research, please cite:
 > _"Aortic Velocity Template-Based Registration Framework for 4D Flow MRI", Vafaeezadeh et al., 2025._
 
 ---
 
-## 🛠 Future Plans
+##  Future Plans
 
 - [ ] Add CLI interface with `argparse`
 - [ ] Export numeric metrics as `.csv`
@@ -141,7 +141,7 @@ output_folder/
 
 ---
 
-## 🧠 Acknowledgments
+##  Acknowledgments
 
 Developed by [Majid Vafaeezadeh](https://github.com/yourusername) for the DeepFlow project at Herat Cardiac Research Lab 🫀
 
