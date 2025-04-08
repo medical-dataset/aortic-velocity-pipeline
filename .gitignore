@@ -1,0 +1,22 @@
+# Ignore temporary/output files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.DS_Store
+*.npy
+*.npz
+*.gif
+*.png
+*.jpg
+*.jpeg
+*.doc
+*.docx
+*.docm
+
+# Ignore VSCode settings
+.vscode/
+
+# Ignore system-specific files
+*.log
+Thumbs.db
