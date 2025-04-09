@@ -66,7 +66,10 @@ import seaborn as sns
 import SimpleITK as sitk
 from scipy.ndimage import center_of_mass
 from skimage.metrics import structural_similarity as ssim
-
+import imageio
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+import matplotlib.patches as mpatches
+from tqdm import tqdm
 # -------------------- Utility Functions --------------------
 def extract_binary_masks(masked_velocity_array, threshold=1e-6):
     return (np.abs(masked_velocity_array) > threshold).astype(np.uint8)
@@ -95,17 +98,82 @@ def deformable_align_masks_to_template(mask_array, external_template):
     aligned_masks, transforms = [], []
     for t in range(T):
         moving = sitk.GetImageFromArray(mask_array[t].astype(np.float32))
-        transform = sitk.BSplineTransformInitializer(ref_img, [10, 10])
+        
+        transform = sitk.BSplineTransformInitializer(ref_img, [10, 10]) #[10, 10]
+        '''
+        grid_physical_spacing = [10.0, 10.0]  # spacing in mm, adjust if needed
+        mesh_size = [int(sz / sp + 0.5) for sz, sp in zip(ref_img.GetSize(), grid_physical_spacing)]
+        transform = sitk.BSplineTransformInitializer(ref_img, mesh_size)
+        
+                # --------------------- STEP 1: PRE-ALIGN (TRANSLATION) ---------------------
+        initial_tx = sitk.CenteredTransformInitializer(
+            ref_img,
+            moving,
+            sitk.Euler2DTransform(),
+            sitk.CenteredTransformInitializerFilter.GEOMETRY
+        )
+
+        # --------------------- STEP 2: INITIALIZE BSPLINE ---------------------
+        grid_physical_spacing = [40.0, 40.0]  # Adjust for smoother or finer deformation
+        mesh_size = [int(sz / sp + 0.5) for sz, sp in zip(ref_img.GetSize(), grid_physical_spacing)]
+        bspline_tx = sitk.BSplineTransformInitializer(ref_img, mesh_size)
+
+        # Compose the transforms: pre-align + bspline
+        composite_tx = sitk.Transform(initial_tx)
+        composite_tx.AddTransform(bspline_tx)
+
+        # --------------------- STEP 3: RUN REGISTRATION ---------------------
+        '''
         registration = sitk.ImageRegistrationMethod()
         registration.SetMetricAsMeanSquares()
         registration.SetOptimizerAsLBFGSB()
         registration.SetInitialTransform(transform, inPlace=False)
         registration.SetInterpolator(sitk.sitkLinear)            #sitkNearestNeighbor        or      sitkLinear 
         final_transform = registration.Execute(ref_img, moving)
-        aligned = sitk.Resample(moving, ref_img, final_transform, sitk.sitkBSpline, 0.0)    #sitkBSpline  sitkLinear
-        aligned = sitk.GetArrayFromImage(aligned) > 0.5                    # 0.5
+        aligned = sitk.Resample(moving, ref_img, final_transform, sitk.sitkBSpline, 0.0)    #sitkBSpline  sitkLinear  sitkNearestNeighbor
+        aligned = sitk.GetArrayFromImage(aligned) > 0.5       #              aligned = sitk.GetArrayFromImage(aligned).astype(np.uint8)                     # aligned = sitk.GetArrayFromImage(aligned) > 0.5 
+        # Resample with NearestNeighbor to preserve binary structure
+        #aligned = sitk.Resample(moving, ref_img, final_transform, sitk.sitkBSpline, 0)
+        #aligned_np = sitk.GetArrayFromImage(aligned)
+        #aligned = (aligned_np >= 0.5).astype(np.uint8)  # Enforce binarization again
+
         aligned_masks.append(aligned.astype(np.uint8))
         transforms.append(final_transform)
+        
+        '''
+        # Pre-align with Euler2D (center-aware)
+        initial_tx = sitk.CenteredTransformInitializer(
+            ref_img,
+            moving,
+            sitk.Euler2DTransform(),
+            sitk.CenteredTransformInitializerFilter.GEOMETRY
+        )
+
+        # BSpline init
+        grid_physical_spacing = [60.0, 60.0]
+        mesh_size = [int(sz / sp + 0.5) for sz, sp in zip(ref_img.GetSize(), grid_physical_spacing)]
+        bspline_tx = sitk.BSplineTransformInitializer(ref_img, mesh_size)
+
+        # Compose transforms using CompositeTransform
+        composite_tx = sitk.CompositeTransform(2)
+        composite_tx.AddTransform(initial_tx)
+        composite_tx.AddTransform(bspline_tx)
+
+        # Registration
+        registration = sitk.ImageRegistrationMethod()
+        registration.SetMetricAsMattesMutualInformation(numberOfHistogramBins=32)
+        registration.SetOptimizerAsLBFGSB()
+        registration.SetInitialTransform(composite_tx, inPlace=False)
+        registration.SetInterpolator(sitk.sitkLinear)
+
+        final_tx = registration.Execute(ref_img, moving)
+
+        aligned = sitk.Resample(moving, ref_img, final_tx, sitk.sitkNearestNeighbor, 0)
+        aligned_mask = sitk.GetArrayFromImage(aligned).astype(np.uint8)
+
+        aligned_masks.append(aligned_mask)
+        transforms.append(final_tx)
+        '''
     return np.stack(aligned_masks), transforms
 
 def deformable_align_velocity(velocity_array, transforms, ref_shape):
@@ -144,58 +212,48 @@ def extract_spatiotemporal_profile(velocity_array, axis='horizontal', line_index
         raise ValueError("Invalid axis")
 
 
-
+# Function to create a deformable alignment GIF
 def create_alignment_gif(mask_array_before, mask_array_after, shifts=None, save_path='alignment.gif'):
-    import matplotlib.pyplot as plt
-    import numpy as np
     import imageio
     from scipy.ndimage import center_of_mass
-    from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
     import matplotlib.patches as mpatches
 
     frames = []
     num_frames = mask_array_before.shape[0]
-    crop_size = 80  # برای زوم روی ماسک
+    crop_size = 80  # Zoom on mask
 
     for i in range(num_frames):
         fig, ax = plt.subplots(figsize=(5, 5))
 
-        # مرکز تصویر برای زوم
+        # Center of mass for zoom
         com = center_of_mass(mask_array_before[i])
         cy, cx = int(round(com[0])), int(round(com[1]))
         r = crop_size // 2
         ax.set_xlim(cx - r, cx + r)
-        ax.set_ylim(cy + r, cy - r)  # چون محور y در تصاویر بالا به پایینه
+        ax.set_ylim(cy + r, cy - r)  # Inverse y-axis for correct orientation
 
-        # نمایش ماسک قبل از الاین - آبی
+        # Show mask before alignment (blue)
         ax.imshow(mask_array_before[i], cmap='Blues', alpha=0.8)
 
-        # فقط کانتور ماسک بعد از الاین - نارنجی
+        # Show contour of mask after alignment (orange)
         ax.contour(mask_array_after[i], levels=[0.5], colors='orange', linewidths=2)
 
-        # رسم فلش مرکز جرم
+        # Center of mass arrow and area difference
         com_before = center_of_mass(mask_array_before[i])
         com_after = center_of_mass(mask_array_after[i])
         dx = com_after[1] - com_before[1]
         dy = com_after[0] - com_before[0]
 
-        # Compute area difference (number of pixels in mask)
         area_before = np.sum(mask_array_before[i])
         area_after = np.sum(mask_array_after[i])
         delta_area = abs(int(area_after) - int(area_before))
 
-        # Debug: Add this line here:
-        print(f"Frame {i}: area_before = {area_before}, area_after = {area_after}, ΔA = {delta_area}")
+        ax.arrow(com_before[1], com_before[0], dx, dy, color='cyan', head_width=2, head_length=2, length_includes_head=True)
 
-
-        ax.arrow(com_before[1], com_before[0], dx, dy, color='cyan',
-                 head_width=2, head_length=2, length_includes_head=True)
-
-        # نمایش مقادیر
         ax.set_title(f"Frame {i} | dy={dy:+.1f}, dx={dx:+.1f}, ΔA={delta_area:+}", fontsize=10)
         ax.axis('off')
 
-        # legend دستی
+        # Legend
         blue_patch = mpatches.Patch(color='blue', label='Before Align')
         orange_line = mpatches.Patch(color='orange', label='After Align (Contour)')
         cyan_line = mpatches.Patch(color='cyan', label='COM Shift')
@@ -208,8 +266,6 @@ def create_alignment_gif(mask_array_before, mask_array_after, shifts=None, save_
         plt.close(fig)
 
     imageio.mimsave(save_path, frames, fps=0.3)
-
-
 
 # -------------------- Visualization & Saving --------------------
 def save_visual_outputs_deformable(result, output_dir):
@@ -254,7 +310,6 @@ def save_visual_outputs_deformable(result, output_dir):
     plt.close()
 
  # --- Zoomed Crops from Variance Map ---
-    from scipy.ndimage import center_of_mass
     crop_size = 40
     cy, cx = center_of_mass(result['binary_mask'][result['ref_idx']])
     cy, cx = int(round(cy)), int(round(cx))
@@ -339,6 +394,7 @@ def visualize_deformable_alignment(mask_array_before, mask_array_after, ref_idx,
         delta_area = np.sum(mask_array_after[idx].astype(np.int32)) - np.sum(mask_array_before[idx].astype(np.int32))
         axs[1, i].text(2, 10, f"dy={dy:+.1f}\ndx={dx:+.1f}\nΔA={delta_area:+.0f}",
                       color='yellow', fontsize=9, bbox=dict(facecolor='black', alpha=0.5))
+
     plt.tight_layout()
     if output_path:
         plt.savefig(os.path.join(output_path, f"{base_name}_deformable_alignment.png"), dpi=150)
@@ -349,7 +405,6 @@ def visualize_deformable_alignment(mask_array_before, mask_array_after, ref_idx,
 # -------------------- Main Processing --------------------
 def process_deformable_folder(folder_path, output_path, ref_method='similarity', axis='horizontal',
                               external_template_path=None, external_template_dir=None, template_prefix="template_phase"):
-    from tqdm import tqdm
     '''
     # Load external template if needed
     external_template = None
@@ -396,7 +451,14 @@ def process_deformable_folder(folder_path, output_path, ref_method='similarity',
                 tpl_path = os.path.join(external_template_dir, f"{template_prefix}_{i:02d}_similarity_10.npy")
                 if os.path.exists(tpl_path):
                     tpl = np.load(tpl_path)
-                    tpl = (tpl > 0.5).astype(np.uint8) if tpl.max() <= 1.0 else tpl.astype(np.uint8)
+                    print(f"Loaded template: {tpl_path} | unique values: {np.unique(tpl)}")
+                    # Explicitly convert to binary if not already
+                    if tpl.dtype != np.uint8 or not np.array_equal(np.unique(tpl), [0, 1]):
+                        tpl = (tpl > 0.5).astype(np.uint8)
+                    print(f"Template {i}: area = {np.sum(tpl)}, COM = {center_of_mass(tpl)}")
+
+                    assert np.array_equal(np.unique(tpl), [0]) or np.array_equal(np.unique(tpl), [0, 1]), \
+                        f"Template {tpl_path} is not binary!"
                     external_templates_dict[i] = tpl
             if len(external_templates_dict) < 30:
                 raise ValueError("Missing some template frames in folder.")
@@ -467,6 +529,7 @@ if __name__ == "__main__":
     # Define input/output directories
     input_folder = r"\\isd_netapp\mvafaeez$\Projects\DeepFlow\deepFlowDocker\scripts\Registration\data"
     output_folder = r"P:\Projects\DeepFlow\deepFlowDocker\scripts\Registration\output\1simNonrigid"
+    #P:\Projects\DeepFlow\deepFlowDocker\scripts\Registration\output\1simNonrigid
     # ------------------------ Template Options ------------------------
     # You must set ONLY ONE of the following:
     # 1) external_template_path : use a single template for all frames
@@ -474,17 +537,14 @@ if __name__ == "__main__":
     # 3) leave both as None     : auto-generate template from input sample
 
     # --- OPTION 1: Use a single shared template for all frames ---
-    external_template_path = None  # # None or set a path to a single .npy file
+    external_template_path = None #r"P:\Projects\DeepFlow\deepFlowDocker\scripts\Registration\templates\Template1simNonrigid" # None or set a path to a single .npy file
     # Example: r"...\final_template_similarity_1000.npy"
 
     # --- OPTION 2: Use a separate template for each frame (multi-template alignment) ---
-    external_template_dir = None#r"\\isd_netapp\mvafaeez$\Projects\DeepFlow\deepFlowDocker\output\Alignment\Template10allsimNonrigid"
+    external_template_dir = None #r"P:\Projects\DeepFlow\deepFlowDocker\scripts\Registration\output\Template10allsimNonrigid"#r"\\isd_netapp\mvafaeez$\Projects\DeepFlow\deepFlowDocker\output\Alignment\Template10allsimNonrigid"
     # None or set a path to a folder with multiple templates (e.g., template_phase_00.npy, etc.)
     template_prefix = "template_phase"  #Used only if external_template_dir is provided, Expected filenames: template_phase_00_similarity_10.npy, etc.
     
-    # Choose alignment method: 'similarity', 'area', or 'template'
-    ref_method = 'similarity'  # Use 'template' if external_template_path or external_template_dir is provided
-
     # ------------------------ Alignment Settings ------------------------
     # ref_method: 
     # 'template' → use external_template_path or external_template_dir

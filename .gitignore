@@ -13,6 +13,7 @@ __pycache__/
 *.doc
 *.docx
 *.docm
+*.csv
 
 # Ignore VSCode settings
 .vscode/
