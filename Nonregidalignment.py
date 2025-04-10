@@ -528,7 +528,7 @@ def process_deformable_folder(folder_path, output_path, ref_method='similarity',
 if __name__ == "__main__":
     # Define input/output directories
     input_folder = r"\\isd_netapp\mvafaeez$\Projects\DeepFlow\deepFlowDocker\scripts\Registration\data"
-    output_folder = r"P:\Projects\DeepFlow\deepFlowDocker\scripts\Registration\output\1simNonrigid"
+    output_folder = r"P:\Projects\DeepFlow\deepFlowDocker\scripts\Registration\output\10simNonRigidTemplateallsim"
     #P:\Projects\DeepFlow\deepFlowDocker\scripts\Registration\output\1simNonrigid
     # ------------------------ Template Options ------------------------
     # You must set ONLY ONE of the following:
@@ -541,7 +541,7 @@ if __name__ == "__main__":
     # Example: r"...\final_template_similarity_1000.npy"
 
     # --- OPTION 2: Use a separate template for each frame (multi-template alignment) ---
-    external_template_dir = None #r"P:\Projects\DeepFlow\deepFlowDocker\scripts\Registration\output\Template10allsimNonrigid"#r"\\isd_netapp\mvafaeez$\Projects\DeepFlow\deepFlowDocker\output\Alignment\Template10allsimNonrigid"
+    external_template_dir = r"P:\Projects\DeepFlow\deepFlowDocker\scripts\Registration\templates\Template10allsimNonrigid" #r"P:\Projects\DeepFlow\deepFlowDocker\scripts\Registration\output\Template10allsimNonrigid"#r"\\isd_netapp\mvafaeez$\Projects\DeepFlow\deepFlowDocker\output\Alignment\Template10allsimNonrigid"
     # None or set a path to a folder with multiple templates (e.g., template_phase_00.npy, etc.)
     template_prefix = "template_phase"  #Used only if external_template_dir is provided, Expected filenames: template_phase_00_similarity_10.npy, etc.
     
@@ -549,7 +549,7 @@ if __name__ == "__main__":
     # ref_method: 
     # 'template' → use external_template_path or external_template_dir
     # 'similarity' or 'area' → auto-select reference frame from the input
-    ref_method = 'similarity'
+    ref_method = 'template'
 
     # Choose axis for spatiotemporal profile ('horizontal', 'vertical', 'full_x', 'full_y')
     axis = 'horizontal'
