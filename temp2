@@ -1,0 +1,471 @@
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import SimpleITK as sitk
+from scipy.ndimage import center_of_mass
+from skimage.metrics import structural_similarity as ssim
+import imageio
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+import matplotlib.patches as mpatches
+from tqdm import tqdm
+# -------------------- Utility Functions --------------------
+def extract_binary_masks(masked_velocity_array, threshold=1e-6):
+    return (np.abs(masked_velocity_array) > threshold).astype(np.uint8)
+
+def choose_reference_frame(mask_array, method='similarity', external_template=None):
+    num_frames = mask_array.shape[0]
+    areas = mask_array.sum(axis=(1, 2))
+    if method == 'area':
+        mean_area = np.mean(areas)
+        return np.argmin(np.abs(areas - mean_area))
+    elif method == 'similarity':
+        total_scores = [np.mean([ssim(mask_array[i], mask_array[j]) for j in range(num_frames) if i != j]) for i in range(num_frames)]
+        return np.argmax(total_scores)
+    elif method == 'template':
+        if external_template is None:
+            raise ValueError("Template image required for template-based reference selection")
+        scores = [ssim(mask_array[i], external_template) for i in range(num_frames)]
+        return np.argmax(scores)
+    else:
+        raise ValueError("Invalid reference selection method")
+
+# -------------------- Deformable Registration --------------------
+def deformable_align_masks_to_template(mask_array, external_template):
+    T, H, W = mask_array.shape
+    ref_img = sitk.GetImageFromArray(external_template.astype(np.float32))
+    aligned_masks, transforms = [], []
+    for t in range(T):
+        moving = sitk.GetImageFromArray(mask_array[t].astype(np.float32))
+        
+        transform = sitk.BSplineTransformInitializer(ref_img, [10, 10]) #[10, 10]
+        '''
+        grid_physical_spacing = [10.0, 10.0]  # spacing in mm, adjust if needed
+        mesh_size = [int(sz / sp + 0.5) for sz, sp in zip(ref_img.GetSize(), grid_physical_spacing)]
+        transform = sitk.BSplineTransformInitializer(ref_img, mesh_size)
+        
+                # --------------------- STEP 1: PRE-ALIGN (TRANSLATION) ---------------------
+        initial_tx = sitk.CenteredTransformInitializer(
+            ref_img,
+            moving,
+            sitk.Euler2DTransform(),
+            sitk.CenteredTransformInitializerFilter.GEOMETRY
+        )
+
+        # --------------------- STEP 2: INITIALIZE BSPLINE ---------------------
+        grid_physical_spacing = [40.0, 40.0]  # Adjust for smoother or finer deformation
+        mesh_size = [int(sz / sp + 0.5) for sz, sp in zip(ref_img.GetSize(), grid_physical_spacing)]
+        bspline_tx = sitk.BSplineTransformInitializer(ref_img, mesh_size)
+
+        # Compose the transforms: pre-align + bspline
+        composite_tx = sitk.Transform(initial_tx)
+        composite_tx.AddTransform(bspline_tx)
+
+        # --------------------- STEP 3: RUN REGISTRATION ---------------------
+        '''
+        registration = sitk.ImageRegistrationMethod()
+        registration.SetMetricAsMeanSquares()
+        registration.SetOptimizerAsLBFGSB()
+        registration.SetInitialTransform(transform, inPlace=False)
+        registration.SetInterpolator(sitk.sitkLinear)            #sitkNearestNeighbor        or      sitkLinear 
+        final_transform = registration.Execute(ref_img, moving)
+        aligned = sitk.Resample(moving, ref_img, final_transform, sitk.sitkBSpline, 0.0)    #sitkBSpline  sitkLinear  sitkNearestNeighbor
+        aligned = sitk.GetArrayFromImage(aligned) > 0.5       #              aligned = sitk.GetArrayFromImage(aligned).astype(np.uint8)                     # aligned = sitk.GetArrayFromImage(aligned) > 0.5 
+        # Resample with NearestNeighbor to preserve binary structure
+        #aligned = sitk.Resample(moving, ref_img, final_transform, sitk.sitkBSpline, 0)
+        #aligned_np = sitk.GetArrayFromImage(aligned)
+        #aligned = (aligned_np >= 0.5).astype(np.uint8)  # Enforce binarization again
+
+        aligned_masks.append(aligned.astype(np.uint8))
+        transforms.append(final_transform)
+        
+        '''
+        # Pre-align with Euler2D (center-aware)
+        initial_tx = sitk.CenteredTransformInitializer(
+            ref_img,
+            moving,
+            sitk.Euler2DTransform(),
+            sitk.CenteredTransformInitializerFilter.GEOMETRY
+        )
+
+        # BSpline init
+        grid_physical_spacing = [60.0, 60.0]
+        mesh_size = [int(sz / sp + 0.5) for sz, sp in zip(ref_img.GetSize(), grid_physical_spacing)]
+        bspline_tx = sitk.BSplineTransformInitializer(ref_img, mesh_size)
+
+        # Compose transforms using CompositeTransform
+        composite_tx = sitk.CompositeTransform(2)
+        composite_tx.AddTransform(initial_tx)
+        composite_tx.AddTransform(bspline_tx)
+
+        # Registration
+        registration = sitk.ImageRegistrationMethod()
+        registration.SetMetricAsMattesMutualInformation(numberOfHistogramBins=32)
+        registration.SetOptimizerAsLBFGSB()
+        registration.SetInitialTransform(composite_tx, inPlace=False)
+        registration.SetInterpolator(sitk.sitkLinear)
+
+        final_tx = registration.Execute(ref_img, moving)
+
+        aligned = sitk.Resample(moving, ref_img, final_tx, sitk.sitkNearestNeighbor, 0)
+        aligned_mask = sitk.GetArrayFromImage(aligned).astype(np.uint8)
+
+        aligned_masks.append(aligned_mask)
+        transforms.append(final_tx)
+        '''
+    return np.stack(aligned_masks), transforms
+
+def deformable_align_velocity(velocity_array, transforms, ref_shape):
+    aligned_velocity = []
+    for v, tf in zip(velocity_array, transforms):
+        v_img = sitk.GetImageFromArray(v.astype(np.float32))
+        ref_img = sitk.GetImageFromArray(np.zeros(ref_shape, dtype=np.float32))
+        aligned = sitk.Resample(v_img, ref_img, tf, sitk.sitkLinear, 0.0)
+        aligned_velocity.append(sitk.GetArrayFromImage(aligned))
+    return np.stack(aligned_velocity)
+
+# -------------------- Feature Extraction --------------------
+def extract_time_profile_and_variance(velocity_array, mask_array, ref_idx, patch_size=5):
+    cy, cx = center_of_mass(mask_array[ref_idx])
+    cy, cx = int(round(cy)), int(round(cx))
+    r = patch_size // 2
+    patch_mask = np.zeros_like(velocity_array[0], dtype=bool)
+    patch_mask[cy - r:cy + r + 1, cx - r:cx + r + 1] = True
+    time_profile = velocity_array[:, patch_mask].mean(axis=1)
+    variance_map = np.var(velocity_array, axis=0)
+    return time_profile, variance_map, patch_mask
+
+def extract_spatiotemporal_profile(velocity_array, axis='horizontal', line_index=None):
+    _, H, W = velocity_array.shape
+    if axis == 'horizontal':
+        y = H // 2 if line_index is None else line_index
+        return velocity_array[:, y, :]
+    elif axis == 'vertical':
+        x = W // 2 if line_index is None else line_index
+        return velocity_array[:, :, x]
+    elif axis == 'full_x':
+        return np.mean(velocity_array, axis=1)
+    elif axis == 'full_y':
+        return np.mean(velocity_array, axis=2)
+    else:
+        raise ValueError("Invalid axis")
+
+
+# Function to create a deformable alignment GIF
+def create_alignment_gif(mask_array_before, mask_array_after, shifts=None, save_path='alignment.gif'):
+    import imageio
+    from scipy.ndimage import center_of_mass
+    import matplotlib.patches as mpatches
+
+    frames = []
+    num_frames = mask_array_before.shape[0]
+    crop_size = 80  # Zoom on mask
+
+    for i in range(num_frames):
+        fig, ax = plt.subplots(figsize=(5, 5))
+
+        # Center of mass for zoom
+        com = center_of_mass(mask_array_before[i])
+        cy, cx = int(round(com[0])), int(round(com[1]))
+        r = crop_size // 2
+        ax.set_xlim(cx - r, cx + r)
+        ax.set_ylim(cy + r, cy - r)  # Inverse y-axis for correct orientation
+
+        # Show mask before alignment (blue)
+        ax.imshow(mask_array_before[i], cmap='Blues', alpha=0.8)
+
+        # Show contour of mask after alignment (orange)
+        ax.contour(mask_array_after[i], levels=[0.5], colors='orange', linewidths=2)
+
+        # Center of mass arrow and area difference
+        com_before = center_of_mass(mask_array_before[i])
+        com_after = center_of_mass(mask_array_after[i])
+        dx = com_after[1] - com_before[1]
+        dy = com_after[0] - com_before[0]
+
+        area_before = np.sum(mask_array_before[i])
+        area_after = np.sum(mask_array_after[i])
+        delta_area = abs(int(area_after) - int(area_before))
+
+        ax.arrow(com_before[1], com_before[0], dx, dy, color='cyan', head_width=2, head_length=2, length_includes_head=True)
+
+        ax.set_title(f"Frame {i} | dy={dy:+.1f}, dx={dx:+.1f}, ΔA={delta_area:+}", fontsize=10)
+        ax.axis('off')
+
+        # Legend
+        blue_patch = mpatches.Patch(color='blue', label='Before Align')
+        orange_line = mpatches.Patch(color='orange', label='After Align (Contour)')
+        cyan_line = mpatches.Patch(color='cyan', label='COM Shift')
+        ax.legend(handles=[blue_patch, orange_line, cyan_line], loc='lower right', fontsize=8, framealpha=0.9)
+
+        canvas = FigureCanvas(fig)
+        canvas.draw()
+        frame = np.frombuffer(canvas.buffer_rgba(), dtype='uint8').reshape(canvas.get_width_height()[::-1] + (4,))
+        frames.append(frame)
+        plt.close(fig)
+
+    imageio.mimsave(save_path, frames, fps=0.3)
+
+# -------------------- Visualization & Saving --------------------
+def save_visual_outputs_deformable(result, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+    base = os.path.splitext(result['filename'])[0]
+
+    def safe_imshow_with_colorbar(data, cmap, title, fname, label):
+        plt.figure(figsize=(6, 6))
+        vmin, vmax = np.nanmin(data), np.nanmax(data)
+        im = plt.imshow(data, cmap=cmap, vmin=vmin, vmax=vmax)
+        if vmin != vmax:
+            plt.colorbar(im, label=label)
+        plt.title(title)
+        plt.tight_layout()
+        plt.savefig(fname)
+        plt.close()
+
+    # Time-Velocity Profile
+    plt.figure(figsize=(8, 4))
+    plt.plot(result['time_profile'])
+    plt.title(f"Time-Velocity Profile: {base}")
+    plt.xlabel("Frame")
+    plt.ylabel("Mean Velocity")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"{base}_time_profile.png"))
+    plt.close()
+
+    # Variance Map
+    safe_imshow_with_colorbar(result['variance_map'], 'hot', f"Turbulence Map: {base}",
+        os.path.join(output_dir, f"{base}_variance_map.png"), "Temporal Variance")
+
+    # Patch Overlay on Reference Frame
+    vmin, vmax = np.nanmin(result['ref_frame_img']), np.nanmax(result['ref_frame_img'])
+    plt.figure(figsize=(6, 6))
+    im = plt.imshow(result['ref_frame_img'], cmap='bwr', vmin=vmin, vmax=vmax)
+    plt.contour(result['patch_mask'], colors='yellow')
+    if vmin != vmax:
+        plt.colorbar(im, label="Velocity")
+    plt.title(f"Patch Overlay on Velocity (Frame {result['ref_idx']})")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"{base}_velocity_patch.png"))
+    plt.close()
+
+ # --- Zoomed Crops from Variance Map ---
+    crop_size = 40
+    cy, cx = center_of_mass(result['binary_mask'][result['ref_idx']])
+    cy, cx = int(round(cy)), int(round(cx))
+    r = crop_size // 2
+    cropped = result['variance_map'][cy - r:cy + r, cx - r:cx + r]
+
+    # Nearest Interpolation (pixelated)
+    vmin = np.nanmin(result['variance_map'])
+    vmax = np.nanmax(result['variance_map'])
+    plt.figure(figsize=(5, 5))
+    if vmin != vmax:
+        im = plt.imshow(result['variance_map'], cmap='jet', vmin=vmin, vmax=vmax)
+        plt.colorbar(im, label="Temporal Variance")
+    else:
+        im = plt.imshow(result['variance_map'], cmap='jet')
+    plt.imshow(cropped, cmap='jet', interpolation='nearest')
+    plt.title("Zoomed Variance (Interpolation: Nearest)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"{base}_variance_zoom_nearest.png"))
+    plt.close()
+
+    # Bilinear Interpolation (smooth)
+    
+    vmin = np.nanmin(result['variance_map'])
+    vmax = np.nanmax(result['variance_map'])
+    plt.figure(figsize=(5, 5))
+    if vmin != vmax:
+        im = plt.imshow(result['variance_map'], cmap='jet', vmin=vmin, vmax=vmax)
+        plt.colorbar(im, label="Temporal Variance")
+    else:
+        im = plt.imshow(result['variance_map'], cmap='jet')
+    plt.imshow(cropped, cmap='jet', interpolation='bilinear')
+    plt.title("Zoomed Variance (Interpolation: Bilinear)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"{base}_variance_zoom_bilinear.png"))
+    plt.close()
+
+
+
+    # Spatiotemporal Profile
+    plt.figure(figsize=(10, 5))
+    sns.heatmap(result['spatiotemporal_profile'], cmap='coolwarm', cbar_kws={'label': 'Velocity'})
+    plt.title(f"Spatiotemporal Profile: {base}")
+    plt.xlabel("Spatial Position")
+    plt.ylabel("Frame")
+    plt.gca().invert_yaxis()
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"{base}_spatiotemporal.png"))
+    plt.close()
+
+    # Reference Frame Only
+    safe_imshow_with_colorbar(result['ref_frame_img'], 'bwr', f"Reference Frame: {base}",
+        os.path.join(output_dir, f"{base}_reference_frame.png"), "Velocity")
+
+    # Create deformable alignment GIF (optional visualization)
+    gif_path = os.path.join(output_dir, f"{base}_deformable_alignment.gif")
+    create_alignment_gif(
+        mask_array_before=result['original_mask'],
+        mask_array_after=result['aligned_mask'],
+        save_path=gif_path
+    )
+
+    # Save aligned velocity array
+    np.save(os.path.join(output_dir, f"{base}_aligned_velocity.npy"), result['aligned_velocity'])
+
+def visualize_deformable_alignment(mask_array_before, mask_array_after, ref_idx, output_path=None, base_name="alignment", num_show=5):
+    indices = list(range(max(0, ref_idx - num_show), min(mask_array_before.shape[0], ref_idx + num_show + 1)))
+    ref_com = center_of_mass(mask_array_before[ref_idx])
+    fig, axs = plt.subplots(2, len(indices), figsize=(3 * len(indices), 6))
+    fig.suptitle(f"Deformable Alignment (Ref Frame: {ref_idx})")
+    for i, idx in enumerate(indices):
+        axs[0, i].imshow(mask_array_before[idx], cmap='gray')
+        axs[0, i].set_title(f"Before Frame {idx}")
+        axs[0, i].axis('off')
+
+        axs[1, i].imshow(mask_array_after[idx], cmap='gray')
+        axs[1, i].set_title(f"After Frame {idx}")
+        axs[1, i].axis('off')
+
+        com_after = center_of_mass(mask_array_after[idx])
+        dy, dx = com_after[0] - ref_com[0], com_after[1] - ref_com[1]
+        delta_area = np.sum(mask_array_after[idx].astype(np.int32)) - np.sum(mask_array_before[idx].astype(np.int32))
+        axs[1, i].text(2, 10, f"dy={dy:+.1f}\ndx={dx:+.1f}\nΔA={delta_area:+.0f}",
+                      color='yellow', fontsize=9, bbox=dict(facecolor='black', alpha=0.5))
+
+    plt.tight_layout()
+    if output_path:
+        plt.savefig(os.path.join(output_path, f"{base_name}_deformable_alignment.png"), dpi=150)
+        plt.close()
+    else:
+        plt.show()
+
+# -------------------- Main Processing --------------------
+def process_deformable_folder(folder_path, output_path, ref_method='similarity', axis='horizontal',
+                              external_template_path=None, external_template_dir=None, template_prefix="template_phase"):
+
+    external_template = None
+    external_templates_dict = {}
+
+    external_template = None
+    external_templates_dict = {}
+
+    if ref_method == 'template':
+        if external_template_dir:
+            for i in range(30):
+                tpl_path = os.path.join(external_template_dir, f"{template_prefix}_{i:02d}_similarity_10.npy")
+                if os.path.exists(tpl_path):
+                    tpl = np.load(tpl_path)
+                    print(f"Loaded template: {tpl_path} | unique values: {np.unique(tpl)}")
+                    # Explicitly convert to binary if not already
+                    if tpl.dtype != np.uint8 or not np.array_equal(np.unique(tpl), [0, 1]):
+                        tpl = (tpl > 0.5).astype(np.uint8)
+                    print(f"Template {i}: area = {np.sum(tpl)}, COM = {center_of_mass(tpl)}")
+
+                    assert np.array_equal(np.unique(tpl), [0]) or np.array_equal(np.unique(tpl), [0, 1]), \
+                        f"Template {tpl_path} is not binary!"
+                    external_templates_dict[i] = tpl
+            if len(external_templates_dict) < 30:
+                raise ValueError("Missing some template frames in folder.")
+        elif external_template_path:
+            external_template = np.load(external_template_path)
+            external_template = (external_template > 0.5).astype(np.uint8) if external_template.max() <= 1.0 else external_template.astype(np.uint8)
+        else:
+            raise ValueError("You selected 'template' method but provided no valid template path or directory.")
+
+    filenames = [f for f in os.listdir(folder_path) if f.endswith('.npy')]
+    results = []
+    for fname in tqdm(filenames):
+        path = os.path.join(folder_path, fname)
+        vel = np.load(path)
+        bin_mask = extract_binary_masks(vel)
+
+        if ref_method == 'template' and external_templates_dict:
+            aligned_mask_list, transforms_list = [], []
+            for i in range(bin_mask.shape[0]):
+                tpl = external_templates_dict.get(i)
+                if tpl is None:
+                    raise ValueError(f"Missing template for frame {i:02d}")
+                aligned_i, tf_i = deformable_align_masks_to_template(np.expand_dims(bin_mask[i], axis=0), tpl)
+                aligned_mask_list.append(aligned_i[0])
+                transforms_list.append(tf_i[0])
+            aligned_mask = np.stack(aligned_mask_list)
+            transforms = transforms_list
+            ref_idx = 0  # dummy for naming
+        elif ref_method == 'template':
+            ref_idx = 0
+            aligned_mask, transforms = deformable_align_masks_to_template(bin_mask, external_template)
+        else:
+            ref_idx = choose_reference_frame(bin_mask, method=ref_method, external_template=external_template)
+            aligned_mask, transforms = deformable_align_masks_to_template(bin_mask, bin_mask[ref_idx])
+
+        aligned_vel = deformable_align_velocity(vel, transforms, ref_shape=aligned_mask[0].shape)
+        time_profile, variance_map, patch_mask = extract_time_profile_and_variance(aligned_vel, aligned_mask, ref_idx)
+        spatiotemporal_profile = extract_spatiotemporal_profile(aligned_vel, axis=axis)
+        result = {
+            'filename': fname,
+            'aligned_velocity': aligned_vel,
+            'ref_idx': ref_idx,
+            'ref_frame_img': aligned_vel[ref_idx],
+            'time_profile': time_profile,
+            'variance_map': variance_map,
+            'patch_mask': patch_mask,
+            'spatiotemporal_profile': spatiotemporal_profile,
+            'binary_mask': bin_mask,
+            'original_mask': bin_mask,
+            'aligned_mask': aligned_mask
+        }
+
+        results.append(result)
+        save_visual_outputs_deformable(result, output_path)
+        visualize_deformable_alignment(
+            mask_array_before=result['original_mask'],
+            mask_array_after=result['aligned_mask'],
+            ref_idx=result['ref_idx'],
+            output_path=output_path,
+            base_name=os.path.splitext(fname)[0]
+        )
+    
+    return results, None
+
+
+# -------------------- Run Entry Point --------------------
+if __name__ == "__main__":
+    # Define input/output directories
+    input_folder = r"\\isd_netapp\mvafaeez$\Projects\DeepFlow\deepFlowDocker\scripts\Registration\data"
+    output_folder = r"P:\Projects\DeepFlow\deepFlowDocker\scripts\Registration\output\10simNonRigidTemplateallsim"
+    #P:\Projects\DeepFlow\deepFlowDocker\scripts\Registration\output\1simNonrigid
+    # ------------------------ Template Options ------------------------
+    # You must set ONLY ONE of the following:
+    # 1) external_template_path : use a single template for all frames
+    # 2) external_template_dir  : use one template per frame (multi-template)
+    # 3) leave both as None     : auto-generate template from input sample
+
+    # --- OPTION 1: Use a single shared template for all frames ---
+    external_template_path = None #r"P:\Projects\DeepFlow\deepFlowDocker\scripts\Registration\templates\Template1simNonrigid" # None or set a path to a single .npy file
+    # Example: r"...\final_template_similarity_1000.npy"
+
+    # --- OPTION 2: Use a separate template for each frame (multi-template alignment) ---
+    external_template_dir = r"P:\Projects\DeepFlow\deepFlowDocker\scripts\Registration\templates\Template10allsimNonrigid" #r"P:\Projects\DeepFlow\deepFlowDocker\scripts\Registration\output\Template10allsimNonrigid"#r"\\isd_netapp\mvafaeez$\Projects\DeepFlow\deepFlowDocker\output\Alignment\Template10allsimNonrigid"
+    # None or set a path to a folder with multiple templates (e.g., template_phase_00.npy, etc.)
+    template_prefix = "template_phase"  #Used only if external_template_dir is provided, Expected filenames: template_phase_00_similarity_10.npy, etc.
+    
+    # ------------------------ Alignment Settings ------------------------
+    # ref_method: 
+    # 'template' → use external_template_path or external_template_dir
+    # 'similarity' or 'area' → auto-select reference frame from the input
+    ref_method = 'template'
+
+    # Choose axis for spatiotemporal profile ('horizontal', 'vertical', 'full_x', 'full_y')
+    axis = 'horizontal'
+    # Run the alignment process
+    process_deformable_folder(
+        folder_path=input_folder,
+        output_path=output_folder,
+        ref_method=ref_method,                 
+        axis=axis,  
+        external_template_path=external_template_path,           
+        external_template_dir=external_template_dir,  
+        template_prefix=template_prefix
+    )

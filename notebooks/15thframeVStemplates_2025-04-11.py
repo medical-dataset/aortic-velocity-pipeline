@@ -274,7 +274,7 @@ output_dir = r"\\isd_netapp\mvafaeez$\Projects\DeepFlow\deepFlowDocker\scripts\R
 
 os.makedirs(output_dir, exist_ok=True)
 
-frame_index =1
+frame_index =15
 template_prefix = "template_phase"
 template_suffix = "_similarity_10.npy"
 num_templates = 30
