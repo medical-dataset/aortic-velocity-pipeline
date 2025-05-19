@@ -15,6 +15,7 @@ __pycache__/
 *.docm
 *.csv
 *.zip
+*.txt
 
 # Ignore VSCode settings
 .vscode/
